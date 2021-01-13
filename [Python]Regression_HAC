@@ -1,0 +1,186 @@
+"""
+Created on Mon Dec 21 18:36:55 2020 (GMT + 8)
+
+@author: Arvin X.Z.
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt	
+import statsmodels.api as stm
+import scipy.stats as sps
+import math
+pd.set_option('display.max_rows',None)
+pd.set_option('display.max_columns',None)
+
+# Import data from the spreadsheet
+data=pd.read_excel("predictability.xls",
+                   parse_dates=["DATE"],
+                   index_col=("DATE"))
+data["logExcessVWMP"]=data.apply(lambda x: \
+                                 math.log(x["retdny"]+1) \
+                                     -math.log(x["tbill"]+1),
+                                 axis=1)
+# VWMP: value weighted mkt portfolio.
+print("data obtained: \n{0}".format(data.head()))
+
+#%%
+Horizon=input("Please specify the horizon(in Number of Months) of the regression: \n") #-------Please specify the horizon of the regression
+# "Horizon"can be:
+# = 1, if the prediction is monthly.
+# = 12, if the prediction is annualy.
+# = 60, i.e. 5yrs*12mths, if the prediction is on 5-year.
+
+Horizon=int(Horizon)
+if Horizon<12:
+    print("\n"+str(Horizon) +"-month predictive regression \n ")
+else:
+    print("\n"+str(int(Horizon/12)) +"-year predictive regression \n ")
+
+Y=data["logExcessVWMP"]
+for i in range(1,Horizon):
+    Y=Y+data["logExcessVWMP"].shift(i)
+Y.drop(Y.index[0:Horizon],inplace=True)
+Y=np.mat(Y).T
+
+X=stm.add_constant(data["dyny"].shift(Horizon))
+X.drop(X.index[0:Horizon],inplace=True)
+X=np.mat(X)
+
+#%%
+# regression by using "statsmodels" package
+print("\n\nregression by using [statsmodels] package: \n")
+reg_HomoUnCorr=stm.OLS(Y,X).fit()
+print("\nregression result with no consideration of Hetero. & Autocorr. : \n \n {0}".format(reg_HomoUnCorr.summary()))
+
+reg_HeteroAutoCorr=stm.OLS(Y,X).fit(cov_type='HAC',cov_kwds={'maxlags':10}) # suppose the bandwith be 10
+print("\nregression result with no consideration of Hetero. & Autocorr. : \n \n {0}".format(reg_HeteroAutoCorr.summary()))
+
+#%%
+# regression by using matric calculations
+print("\n\nregression by using matric calculations: \n")
+
+#Specify a blank DataFrame to store the regression results.
+regOutput=pd.DataFrame(columns = ["regressor", "coef.",
+                                  "Std.Err.","t_stat", "p_value", 
+                                  "HAC_Std.Err.","HAC_z_stat", "HAC_p_value"]) 
+
+n=X.shape[0]  #Number of observations
+k=X.shape[1]  #Number of explanatories (incl. constant)
+
+#OLS Regression
+beta_hat=(X.T*X).I*X.T*Y 
+    # beta_hat[0] --> intercept
+    # beta_hat[1] --> dyny
+re=Y-X*beta_hat  # Residual Vector
+
+#%%
+#Significance test with assumption of Homoskedasticity and Unautocorrelation 
+sigma_hat=np.sqrt(re.T*re/(n-k))
+
+#Test on Constant
+c=np.mat(np.zeros([k,1]))  # specify the condition vector
+c[0]=1
+SE_const=sigma_hat*np.sqrt(c.T*(X.T*X).I*c)
+t_stat_const=c.T*beta_hat/SE_const
+
+#Test on Regressor
+c=np.mat(np.zeros([k,1]))  # specify the condition vector
+c[1]=1
+SE_beta1=sigma_hat*np.sqrt(c.T*(X.T*X).I*c)
+t_stat_beta1=c.T*beta_hat/SE_beta1
+
+#%%
+#Significance test with adjustment of HAC (Heteroskedasticity and Autocorrelation)
+
+lag=10 # Specify the lag number of Newey-West Estimator
+# Newey-West CovMatrix Estimation-------------------------------------
+# The Heteroskedasticity Correction Term
+t=0
+x_t=X[t,:].T
+heteroAdj=np.sum(re[t]**2)*(x_t*x_t.T) 
+
+for t in range(1,n):
+    x_t=X[t,:].T
+    heteroAdj=heteroAdj+np.sum(re[t]**2)*(x_t*x_t.T)
+
+# The Autocorrelation Correction Term
+autocorAdj=np.zeros(shape=heteroAdj.shape)
+for l in range(1,lag+1):
+    for t in range(l,n):
+        w_l=1-l/(1+lag)
+        x_t=X[t,:].T
+        x_t_l=X[t-l,:].T
+        Chng_autocorAdj=np.sum(w_l*re[t]*re[t-l])*(x_t*x_t_l.T+x_t_l*x_t.T)
+        autocorAdj=autocorAdj+Chng_autocorAdj
+
+# The Newey-West HAC CovMatrix
+NW_Q_est=1/(n)*(heteroAdj+autocorAdj)
+var_beta_HAC=n*(X.T*X).I*NW_Q_est*(X.T*X).I
+
+#Test on Constant
+c=np.mat(np.zeros([k,1]))  # specify the condition vector
+c[0]=1
+SE_const_HAC=np.sqrt(c.T*var_beta_HAC*c)
+z_const=c.T*beta_hat/SE_const_HAC
+
+#Test on Regressor
+c=np.mat(np.zeros([k,1]))  # specify the condition vector
+c[1]=1
+SE_beta1_HAC=np.sqrt(c.T*var_beta_HAC*c)
+z_beta1=c.T*beta_hat/SE_beta1_HAC
+
+# --------------------------------------------------------------------
+
+#add results to the [regOutput]
+regOutput=regOutput.append({"regressor":"const.",
+                            "coef.":np.sum(beta_hat[0]),
+                            "Std.Err.":np.sum(SE_const),
+                            "t_stat":np.sum(t_stat_const),
+                            "p_value":np.float(1-sps.t.cdf(abs(t_stat_const),df=n-k))*2,
+                            "HAC_Std.Err.":np.sum(SE_const_HAC),
+                            "HAC_z_stat":np.sum(z_const),
+                            "HAC_p_value":np.float(1-sps.norm.cdf(abs(z_const),loc=0,scale=1))*2
+                            },ignore_index=True)
+
+regOutput=regOutput.append({"regressor":"dyny",
+                            "coef.":np.sum(beta_hat[1]),
+                            "Std.Err.":np.sum(SE_beta1),
+                            "t_stat":np.sum(t_stat_beta1),
+                            "p_value":np.float(1-sps.t.cdf(abs(t_stat_beta1),df=n-k))*2,
+                            "HAC_Std.Err.":np.sum(SE_beta1_HAC),
+                            "HAC_z_stat":np.sum(z_beta1),
+                            "HAC_p_value":np.float(1-sps.norm.cdf(abs(z_beta1),loc=0,scale=1))*2
+                            },ignore_index=True)
+#[np.sum] above are all used to transfer the format from matrix to plain numbers
+
+print("\nObservastions = "+str(n))
+print("Regression Result: \n{0}".format(regOutput))
+
+#%%
+# Sensitivity Analysis (SE change with lags)
+lagNum=range(1,671)
+HACSE=pd.DataFrame(lagNum,columns=["lagNum"])
+HACSE["HAC_Std_Error"]=pd.DataFrame(np.zeros((671,1)))
+
+for lags in lagNum:
+    reg_HeteroAutoCorr=stm.OLS(Y,X).fit(cov_type='HAC',cov_kwds={'maxlags':lags})
+    HACSE.iloc[lags-1,1]=reg_HeteroAutoCorr.bse[1] # Std Error of X
+    # Display a simple process bar
+    a=">"*(lags)
+    b="-"*(671-lags)
+    c=lags/671*100
+    print( "\r %2d%% [%s%s]" % (c,a,b),end='')
+
+plt.figure(figsize=(16,8))
+plt.plot(HACSE["lagNum"],HACSE["HAC_Std_Error"],'r-',lw=1.5)
+plt.xlabel("Number of Lags",fontsize=12)
+plt.ylabel("HAC Standard Error of dyny",fontsize=12)
+if Horizon<12:
+    plt.title("Horizon ="+str(Horizon) +" months",fontsize=12)
+else:
+    plt.title("Horizon ="+str(int(Horizon/12)) +" year(s)",fontsize=12)
+plt.grid('True')
+plt.show()
+#%%
+   
